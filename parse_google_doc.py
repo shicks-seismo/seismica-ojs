@@ -17,14 +17,6 @@ import os, sys
     # re-combine oddly segmented nested lists? Might be more trouble than it's worth
     # nested accordions? at least for one spot in policies for data availability/types
         # and/or other things that are in paragraph-sections (could also reformat as ol post-google)
-# TODO for google doc formatting to make this work:
-    # links between sections and between different documents: numbers mean nothing
-    # weird italicized *Seismica*'s things in ed pol
-    # get rid of as many numbered lists as possible
-    # update links (esp cross-document) to the right things, un-highlight
-
-# for linking to open particular panels in accordion (same page only):
-# <p><a href="#collapseSeven" data-target="#collapseSeven" data-toggle="collapse" data-parent="#accordionExample">link to open seventh panel</a></p>
 
 # goal: something that looks like the following
 #
@@ -452,6 +444,11 @@ if __name__ == '__main__':
         th.attrs['style'] = "border:1px solid black"
     for td in bowl.find_all('td'):
         td.attrs['style'] = "border:1px solid black"
+
+    # <p> list items:
+    for li in bowl.find_all('li'):
+        li.name = 'p'
+        li.wrap(bowl.new_tag('li'))
 
     # write
     bowl.smooth()
