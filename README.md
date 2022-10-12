@@ -15,3 +15,7 @@ The current version of the script is a bit brittle because google apparently doe
 - numpy
 - [cssutils](https://cthedot.de/cssutils/)
 - re, os, sys, copy, argparse, urllib
+
+### todo
+- write the sets of guidelines to 3 files rather than one big file; easier to copy-paste to the three website pages
+- someday it would be nice to actually fix the nested lists html, but it's also surprisingly difficult
