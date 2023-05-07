@@ -1,22 +1,25 @@
 import numpy as np
-import pandas as pd
 from bs4 import BeautifulSoup
 import cssutils as csu
 from copy import copy
 from argparse import ArgumentParser
 import re
 import urllib
-import os, sys
+import os
+from pathlib import Path
+from collections import namedtuple
+import unicodedata
+from html import unescape
 
 ####
 # parse google doc of guidelines AND editorial policies (html download) and reformat
 # for OJS site with (nested?) dropdowns
 #
 # TODO:
-    # catch for any hdr2 sections that *start* with <ol> or <ul> (ln 344, 'prev' etc)
-    # re-combine oddly segmented nested lists? Might be more trouble than it's worth
-    # nested accordions? at least for one spot in policies for data availability/types
-        # and/or other things that are in paragraph-sections (could also reformat as ol post-google)
+# catch for any hdr2 sections that *start* with <ol> or <ul> (ln 344, 'prev' etc)
+# re-combine oddly segmented nested lists? Might be more trouble than it's worth
+# nested accordions? at least for one spot in policies for data availability/types
+# and/or other things that are in paragraph-sections (could also reformat as ol post-google)
 
 # goal: something that looks like the following
 #
@@ -102,7 +105,6 @@ def clean_spans(soup,translate={}):
 def get_h1_h2(ingredients):
     """
     from a soup, extract indices of elements that contain h1 or h2 tags
-    hdr1 has one extra element added for fenceposting
     """
     hdr1 = []; hdr2 = []
     hdr1_text = []; hdr2_text = []
@@ -117,7 +119,6 @@ def get_h1_h2(ingredients):
             gettext = ing.text.lower()
             gettext = re.sub(r'[^\w\s]','',gettext)
             hdr2_text.append(gettext.replace(' ','-'))
-    hdr1.append(len(ingredients)+1)  # dummy entry for EOL
     hdr1 = np.array(hdr1); hdr2 = np.array(hdr2)
     return hdr1, hdr2, hdr1_text, hdr2_text
 
@@ -228,10 +229,12 @@ def nest_lis(idivtext):
 
 # here are some css tags that we want to translate, and how we want to translate them
 # NOTE <u> is maybe not best practice? Also here I think it only applies to hyperlinks.
-css_keys = {'font-weight':{'700':'strong'},\
-            'font-style':{'italic':'em'},\
-            'text-decoration':{'underline':'u'},\
-            'background-color':{'#ff0':'mark'}}
+css_keys = {
+    "font-weight": {"700":"strong"},
+    "font-style": {"italic": "em"},
+    "text-decoration": {"underline": "u"},
+    "background-color": {"#ff0": "mark"},
+}
 
 def _has_href(tag):
     """
@@ -241,28 +244,33 @@ def _has_href(tag):
 
 if __name__ == '__main__':
 
+    tmp_dir = os.path.join(Path(__file__).resolve().parent, "tmp")
+    out_dir = os.path.join(Path(__file__).resolve().parent, "policy_documents")
+
     # start by exporting google doc as html and extracting the html file from the zip archive
     # (we don't need any image files afaik)
 
     # filename and type (guidelines or not, ie editorial policies) can be set by command line args
     # if those aren't present, we ask for the info via input()
     parser = ArgumentParser()
-    parser.add_argument('--ifile','-f',metavar='ifile',type=str,help='path to input file')
+    parser.add_argument("--ifile", "-f", metavar="ifile", type=str, help="path to input file")
     args = parser.parse_args()
 
     ifile = args.ifile
+    # ifile = "policies.html"  # for debugging only
     if ifile == None:
-        ifile = input('Enter path to input file: ') or 'combined_doc.html'
-    assert os.path.isfile(ifile),'file does not exist'
+        ifile = input("Enter path to input file: ") or "policies.html"
+    ifile = os.path.join(tmp_dir, ifile)
+    assert os.path.isfile(ifile), f"file `{ifile}` does not exist"
 
-    # set ofile names
-    ofile = 'out_allthings.html'
+    # Get input HTML
+    with open(ifile, "r") as f:
+        text = f.readline() # google docs outputs html as one single line, weirdly
 
-    # then:
-    f = open(ifile,'r') # open html file
-    text = f.readline()  # google docs outputs html as one single line, weirdly
-    f.close()
-    soup = BeautifulSoup(text,'html.parser')  # parse to a soup
+    soup = BeautifulSoup(text, "html.parser")  # parse to a soup
+    
+    """ Header parsing """
+
     header = soup.head.extract()
     if bool(soup.img): soup.img.decompose()  # get rid of the header image (seismica logo)
         # (only for guidelines, but doesn't hurt ed pol b/c there are no images in it)
@@ -272,19 +280,22 @@ if __name__ == '__main__':
     # we will only look at .c# styles, and find italics, bold, and underline
     #   [info on what is looked for/translated is in css_keys before __main__]
     # we're skipping all the hyper-specific list element formatting at the moment
-    translate_tags = class_translate(style,css_keys)
+    translate_tags = class_translate(style, css_keys)
     translate = {}  # need to actually make soup tags to wrap things in; do this outside of function
     for k in translate_tags.keys():
         translate[k] = []
         for a in translate_tags[k]:
             translate[k].append(soup.new_tag(a))
+    
+
+    """ Intermediate cleaning """
 
     # figure out what the comment div class name is, strip out comments
     cmt_class = find_comment_class(soup)
-    soup = strip_comments(soup,cmt_class=cmt_class)
+    soup = strip_comments(soup, cmt_class=cmt_class)
 
     # clean up span formatting, translate to html tags since we can't use css header
-    soup = clean_spans(soup,translate=translate)
+    soup = clean_spans(soup, translate=translate)
 
     # clean out empty tags etc
     soup = clean_soup(soup)  # not all apply to ed pol, but that's actually fine
@@ -292,116 +303,210 @@ if __name__ == '__main__':
     # make a copy of the soup and empty it so we can add things back in
     bowl = copy(soup)
     bowl.body.clear()
-    del bowl.body['class']  # for neatness
+    del bowl.body["class"]  # for neatness
+
+
+    """ Accordion tag placeholders """
 
     # set up generic accordion tags that can be modified later
-    span = bowl.new_tag('span'); span.attrs['class'] = 'pull-left'; span.string = 'heading here'
-    button = bowl.new_tag('button')
-    button.attrs = {'class':"btn btn-lg btn-light btn-block collapsed",\
-                    'type':'button',\
-                    'data-toggle':'collapse',\
-                    'data-target':'#collapse01',\
-                    'aria-expanded':'false',\
-                    'aria-controls':'collapse01'}
-    h2 = bowl.new_tag('h2'); h2.attrs['class'] = 'mb-0'
-    divhead = bowl.new_tag('div'); divhead.attrs = {'id':'heading01','class':'card-header'}
-    divcoll = bowl.new_tag('div')
-    divcoll.attrs = {'id':'collapse01','class':'collapse','aria-labelledby':'heading01',\
-                    'data-parent':'#accid'}
-    divtext = bowl.new_tag('div'); divtext.attrs['class'] = 'card-body';# divtext.string = 'text here'
-    card = bowl.new_tag('div'); card.attrs['class'] = 'card'
+    span = bowl.new_tag("span")
+    span.attrs["class"] = "pull-left"
+    span.string = "heading here"
+
+    button = bowl.new_tag("button")
+    button.attrs = {
+        "class": "btn btn-lg btn-light btn-block collapsed",
+        "type": "button",
+        "data-toggle": "collapse",
+        "data-target": "#collapse01",
+        "aria-expanded": "false",
+        "aria-controls": "collapse01",
+    }
+
+    h2 = bowl.new_tag("h2")
+    h2.attrs["class"] = "mb-0"
+
+    divhead = bowl.new_tag("div")
+    divhead.attrs = {
+        "id": "heading01",
+        "class": "card-header",
+    }
+
+    divcol = bowl.new_tag("div")
+    divcol.attrs = {
+        "id": "collapse01",
+        "class": "collapse",
+        "aria-labelledby": "heading01",
+        "data-parent": "#accid",
+    }
+
+    divtext = bowl.new_tag("div")
+    divtext.attrs["class"] = "card-body" 
+    # divtext.string = "text here"
+
+    card = bowl.new_tag("div")
+    card.attrs["class"] = "card"
+
+    A = namedtuple("accordion", ["span", "button", "h2", "divhead", "divcol", "divtext", "card"])
+    accordion = A(span, button, h2, divhead, divcol, divtext, card)
+    # The del line is just for debuggin. Remove at will
+    del span, button, h2, divhead, divcol, divtext, card
+
+
+    """ Body parsing """
 
     # go through body of soup element-wise, and deal with each in turn
     ingredients = soup.body.find_all(recursive=False)  # reset list
     # run through ingredients and map out where the headers and such are for overall structure
-    hdr1, hdr2, h1text, h2text = get_h1_h2(ingredients)
+    h1, h2, h1text, h2text = get_h1_h2(ingredients)
 
     everything = {}  # dict for holding content so we can transfer duplicates
     # SPLIT HERE for ed pol vs guidelines in main loop
-    for i in range(len(hdr1)-1):  # looping level 1 (Authors, Reviewers, Editors)
+    for i, (this_h1, this_h1_text) in enumerate(zip(h1, h1text)):
+        
+        # Check if there is a next h1 tag
+        if this_h1 != h1[-1]:
+            next_h1 = h1[i+1]
+        # If not: go to the end
+        else:
+            next_h1 = len(ingredients)
+
         # put in h1 header for marking
-        h1 = ingredients[hdr1[i]]  # get the h1 element
-        new = bowl.new_tag('h1'); new.string = h1.text   # make a new tag for it
-        bowl.body.append(new)
+        new_h1 = bowl.new_tag("h1")
+        new_h1.string = ingredients[this_h1].text
+        bowl.body.append(new_h1)
 
         # start building the accordion
-        acc_id = 'acc_%s' % h1text[i]  # id from section head - long but at least not arbirtray
-        accord = bowl.new_tag('div'); accord.attrs = {'id':acc_id,'class':'accordion'}
+        acc_id = f"acc_{this_h1_text}"  # id from section head - long but at least not arbirtray
+        accord = bowl.new_tag("div")
+        accord.attrs = {
+            "id": acc_id,
+            "class": "accordion",
+        }
         bowl.body.append(accord)  # we'll insert elements as they are made
 
         # go through the h2 markers, and between each, preserve whatever's there
-        ic = 0  # counter for collapsible headings
-        hdr2_use = hdr2[np.logical_and(hdr2>hdr1[i],hdr2<hdr1[i+1])]
-        hdr2_use = np.append(hdr2_use,hdr1[i+1])  # bookends again
-        h2t_use = np.array(h2text)[np.logical_and(hdr2>hdr1[i],hdr2<hdr1[i+1])]
-        h2t_use = np.append(h2t_use,'x')  # bookends again
-        for j in range(len(hdr2_use)-1):
-            icard = copy(card)
+        inds_h2 = (h2 > this_h1) & (h2 < next_h1)
+
+        h2_use = h2[inds_h2]
+        h2t_use = np.array(h2text)[inds_h2]
+
+        for j, (this_h2, this_h2_text) in enumerate(zip(h2_use, h2t_use)):
+
+            print(this_h1_text, this_h2_text)
+            
+            # Check if there is a next h2 tag
+            if this_h2 != h2_use[-1]:
+                next_h2 = h2_use[j+1]
+            # If not: go to the end
+            else:
+                next_h2 = next_h1
+
+            """
+            The structure of an accordion card is as follows:
+
+            <div>
+
+                <div header>
+                    <h2>
+                        <button>
+                            <span>Header test</span
+                        </button>
+                    </h2>
+                </div header>
+
+                <div body>
+                    <div wrapper>
+                        Content...
+                    </div wrapper>
+                </div body>
+
+            </div
+            """
+            
+            # Create a new card
+            icard = copy(accordion.card)
             accord.append(icard)
-            ing = ingredients[hdr2_use[j]]
-            ispan = copy(span); ispan.string = ing.text.strip()
-            icard.insert(0,ispan)
-            ibutton = copy(button)
-            ibutton.attrs['data-target'] = '#%s' % h2t_use[j]
-            ibutton.attrs['aria-controls'] = '%s' % h2t_use[j]
+
+            # Add a span with h2
+            ispan = copy(accordion.span)
+            ispan.string = ingredients[this_h2].text.strip()
+            icard.insert(0, ispan)
+
+            # Add a button with h2 text and wrap around span
+            ibutton = copy(accordion.button)
+            ibutton.attrs["data-target"] = f"#{this_h2_text}"
+            ibutton.attrs["aria-controls"] = this_h2_text
             ispan.wrap(ibutton)
-            ih2 = copy(h2); ibutton.wrap(ih2)
-            idivhead = copy(divhead); idivhead.attrs['id'] = '%s' % h2t_use[j] #'heading%02d' % ic
+
+            # Wrap h2 tag around button
+            ih2 = copy(accordion.h2)
+            ibutton.wrap(ih2)
+
+            # Wrap wrap div head around h2 tag
+            idivhead = copy(accordion.divhead)
+            idivhead.attrs["id"] = this_h2_text
             ih2.wrap(idivhead)
 
-            idivcoll = copy(divcoll)
-            idivcoll.attrs['id'] = '%s' % h2t_use[j]
-            idivcoll.attrs['aria-labelledby'] = '%s' % h2t_use[j] # 'heading%02d' % ic
-            idivcoll.attrs['data-parent'] = '#%s' % acc_id
-            icard.insert(1,idivcoll)
-
+            # Create collapsible content div
+            idivcol = copy(accordion.divcol)
+            idivcol.attrs["id"] = this_h2_text
+            idivcol.attrs["aria-labelledby"] = this_h2_text
+            idivcol.attrs["data-parent"] = f"#{acc_id}"
+            icard.insert(1, idivcol)
 
             # check if this content already exists in a previous accordion
-            if len(everything) > 0 and h2t_use[j] in everything.keys():
-                idivtext = copy(everything[h2t_use[j]])
-                idivcoll.insert(0,idivtext)
-                ic += 1
+            if (len(everything) > 0) and (this_h2_text in everything.keys()):
+                """
+                This block allows for recycling of content that is listed as
+                "See [elsewhere]" in the Google Doc
+                """
+                print(f"Header `{this_h2_text}` found in a previous accordion (currently at `{this_h1_text}`). Copying contents...")
+                idivtext = copy(everything[this_h2_text])
+                idivcol.insert(0, idivtext)
             else:
-                idivtext = copy(divtext)
-                idivcoll.insert(0,idivtext)
-                ic += 1
+                # Insert a new wrapper div
+                idivtext = copy(accordion.divtext)
+                idivcol.insert(0, idivtext)
 
-                for k in range(hdr2_use[j]+1,hdr2_use[j+1]):
-                    try:
-                        ing = ingredients[k]
-                    except IndexError:  # reached end of list, hopefully
-                        break
+                """ Loop over all elements up to next h2 """
+                for k in range(this_h2 + 1, next_h2):
 
-                    # if we don't break things, move on to check this element
-                    if ing.name == 'table': # this should be the reviewer recommendations table
-                        ing.attrs['class'] = 'table'
-                        if not bool(ing.thead):  # no header line, need to make the first row a header
+                    ing = ingredients[k]
+                    
+                    # Table handling
+                    if ing.name == "table": # this should be the reviewer recommendations table - MvdE: and scope?
+                        ing.attrs["class"] = "table"
+                        if ing.thead is None:  # no header line, need to make the first row a header
                             first_row = ing.tr.extract()
-                            thead = bowl.new_tag('thead')
-                            ing.insert(0,thead)
+                            thead = bowl.new_tag("thead")
+                            ing.insert(0, thead)
                             thead.append(first_row)
-                            for td in first_row.find_all('td'): 
-                                td.wrap(bowl.new_tag('th')) 
+                            for td in first_row.find_all("td"): 
+                                td.wrap(bowl.new_tag("th")) 
                                 td.unwrap() 
                         idivtext.append(ing)
 
-                    elif ing.name == 'ul':  # put this back in the hierarchy with the previous ol
+                    # List handling
+                    elif ing.name == "ul":  # put this back in the hierarchy with the previous ol
                         prev = ingredients[k-1]  # should be ol
-                        if prev.name == 'ol':
-                            prev = idivtext.find_all('ol')[-1]
+                        if prev.name == "ol":
+                            prev = idivtext.find_all("ol")[-1]
                             ul = ing.extract()
                             prev.append(ul)
                         else:
                             idivtext.append(ing)
 
+                    # No handling
                     else:
                         idivtext.append(ing)
 
+            
                 # check <ol>s within this card; if the first one has start != 1, reset it
                 # (this happens at one particular point in the reviewer guidelines at the moment)
-                ols = idivtext.find_all('ol')
-                if len(ols) > 0 and ols[0].attrs['start'] != 1:
-                    ols[0].attrs['start'] = '1'
+                ols = idivtext.find_all("ol")
+                if len(ols) > 0 and ols[0].attrs["start"] != 1:
+                    ols[0].attrs["start"] = "1"
 
                 # check if we need to recursively nest any ols
                 if check_whose(idivtext):
@@ -416,7 +521,7 @@ if __name__ == '__main__':
                         iadd = True
                         while iadd:
                             toadd = olstart.next_sibling.extract()
-                            if toadd.name == 'ol':
+                            if toadd.name == "ol":
                                 iadd = False
                             olstart.append(toadd)
                         ol_list,sts,lis = _ol_info(idivtext)
@@ -424,36 +529,109 @@ if __name__ == '__main__':
                         if np.all(whose):
                             iq = True
 
-                # nest extra bits (<p> etc) one more time now that numbers are matched
-                idivtext = nest_in_between(idivtext)
-                #idivtext = nest_lis(idivtext)
+            # nest extra bits (<p> etc) one more time now that numbers are matched
+            idivtext = nest_in_between(idivtext)
+            everything[this_h2_text] = idivtext  # save in case this is duplicated
 
-                everything[h2t_use[j]] = idivtext  # save in case this is duplicated
+        """ End loop over h2 elements """
 
-    # unwrap hyperlinks that google has wrapped with extra stuff
+
+    """ End loop over h1 elements """
+
+    """ Parse URIs """
+
+    # Pattern to match external URL
+    url_needle = re.compile("https://www\.google\.com/url\?q=([^&]+)")
+
+    # Find all URLs in the bowl
     links = bowl.find_all(_has_href)
+
+    # Loop over URLs
     for link in links:
-        if link.attrs['href'].startswith('#ftnt') or link.attrs['href'].startswith('mailto'):
-            continue
-        link.attrs['href'] = urllib.parse.unquote(link.attrs['href'].split('?q=')[1].split('&')[0])
+        # Check if pattern matches
+        match = url_needle.search(urllib.parse.unquote(link.attrs["href"]))
+        if match is not None:
+            # If a match: extract only the second part (after /url?q=...)
+            link.attrs["href"] = match.group(1)
 
     # border the tables
-    for tab in bowl.find_all('table'):
-        tab.attrs['style'] = "border:1px solid black;border-collapse:collapse"
-    for th in bowl.find_all('th'):
-        th.attrs['style'] = "border:1px solid black"
-    for td in bowl.find_all('td'):
-        td.attrs['style'] = "border:1px solid black"
+    for tab in bowl.find_all("table"):
+        tab.attrs["style"] = "border:1px solid black;border-collapse:collapse"
+    for th in bowl.find_all("th"):
+        th.attrs["style"] = "border:1px solid black"
+    for td in bowl.find_all("td"):
+        td.attrs["style"] = "border:1px solid black"
 
     # <p> list items:
-    for li in bowl.find_all('li'):
-        li.name = 'p'
-        li.wrap(bowl.new_tag('li'))
+    for li in bowl.find_all("li"):
+        li.name = "p"
+        li.wrap(bowl.new_tag("li"))    
 
-    # write
+    # Smooth the soup
     bowl.smooth()
-    f = open(ofile,'w')
-    #f.write(bowl.prettify())
-    f.write(str(bowl))
-    f.close()
 
+    for h1 in bowl.find_all("h1"):
+        div = h1.find_next_sibling("div")
+
+        second_bowl = BeautifulSoup()
+        # second_bowl.append(h1)
+        second_bowl.append(div)
+
+        # Convert characters to unicode
+        s = unescape(second_bowl.prettify())
+        s = unicodedata.normalize("NFKC", s)
+
+        """ Regex pattern fixing """
+
+        # Reposition spaces that are inside <a> tags
+        a_needle = re.compile(r"<a ([^>]*)>\s*(.*?)\s*<\/a>")
+        s = a_needle.sub(r" <a \1>\2</a> ", s)
+
+        # Reposition spaces that are inside other tags (with no attributes)
+        for tag in ("em", "u", "strong"):
+            needle = re.compile(rf"<{tag}>\s*(.*?)\s*<\/{tag}>")
+            s = needle.sub(rf" <{tag}>\1</{tag}> ", s)
+
+        # Replace the following occurrences:
+        # <u><a>...</a></u
+        ua_needle = re.compile(r"<u>[^<]*(<a [^>]*>[^<]*</a>)[^>]*<\/u>")
+        # space(s) followed by punctuation
+        space_needle = re.compile(r"\s*([,.;:\)\?])")
+        # a ( followed by a space
+        space_needle2 = re.compile(r"([\(])\s*")
+        for needle in (ua_needle, space_needle, space_needle2):
+            s = needle.sub(r"\1", s)
+
+        # Fix commas not followed by a space, except if followed by a number
+        space_needle3 = re.compile(r",(?!\s|\d)(?=[^,]*,)")
+        s = space_needle3.sub(", ", s)
+
+        # Replace </strong>[spaces]\n[spaces]<strong>
+        strong_needle = re.compile(r"<\/strong>\s*\n\s*<strong>")
+        s = strong_needle.sub("", s)
+
+        # Fix unicode characters
+        replace_dict = {
+            "’": "'",
+            "‘": "'",
+            "“": "\"",
+            "”": "\"",
+            "–": "-",
+            "—": "-",
+        }
+        for key, val in replace_dict.items():
+            s = s.replace(key, val)
+
+        """
+        Generate output
+        """
+
+        fname = h1.text.lower()
+        fname = re.sub(r"[^\w\s]", "", fname).replace(" ", "-")
+        ofile = os.path.join(out_dir, f"{fname}.html")
+
+        # Write to output file
+        with open(ofile, "w") as f:
+            f.write(s)
+
+    print("Done")
